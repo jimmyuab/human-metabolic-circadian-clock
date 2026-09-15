@@ -18,8 +18,10 @@ glucose output, lipolysis, triglycerides) and whole-body outputs (core
 temperature, energy expenditure, muscle performance).
 
 **Features:** 24 h polar clock dial with sleep/eating windows · heatmap ·
-overlay curves · "right now" marker levels · chronotherapy-style day plan,
-all personalized by chronotype and sleep schedule.
+overlay curves · "right now" marker levels · chronotherapy-style day plan ·
+disease/condition perturbations (obesity, T2D, MASLD/MASH, shift work) ·
+core-clock + tissue gene rhythms (liver, adipose, pancreatic islets), all
+personalized by chronotype and sleep schedule.
 
 **Model:** sharpened-cosinor curves phased to population-average acrophases
 (intermediate chronotype, 07:00 wake), shifted by

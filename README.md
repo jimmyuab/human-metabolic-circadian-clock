@@ -29,6 +29,10 @@ muscle performance).
 - **Your day plan** — chronotherapy-style timing suggestions (light,
   time-restricted eating, largest meal, caffeine cutoff, exercise, wind-down)
   personalized by chronotype and sleep schedule.
+- **Disease / condition** — obesity, type 2 diabetes, MASLD/MASH and shift
+  work as illustrative amplitude-damping + phase-delay perturbations.
+- **Gene rhythms** — core clock genes (BMAL1, PER1/2, CRY1/2, REV-ERBα, DBP)
+  plus tissue metabolic genes for liver, adipose and pancreatic islets.
 
 ## Model
 

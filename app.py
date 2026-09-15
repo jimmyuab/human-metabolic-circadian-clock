@@ -8,6 +8,10 @@ import plotly.graph_objects as go
 import gradio as gr
 from circadian_model import (
     CHRONOTYPE_OFFSET_H,
+    CONDITIONS,
+    TISSUES,
+    gene_curve,
+    tissue_gene_table,
     MARKERS,
     build_frame,
     fmt_clock,
@@ -37,8 +41,9 @@ def _hour_theta(h: float) -> float:
     return (h % 24.0) * 15.0  # degrees, midnight at top (rotation=90)
 
 
-def clock_figure(chronotype: str, wake: float, bed: float) -> go.Figure:
-    shift = phase_shift_hours(chronotype, wake)
+def clock_figure(chronotype: str, wake: float, bed: float,
+                 condition: str) -> go.Figure:
+    shift = phase_shift_hours(chronotype, wake) + CONDITIONS[condition]["shift"]
     fig = go.Figure()
 
     # sleep arc (outer ring)
@@ -91,8 +96,9 @@ def clock_figure(chronotype: str, wake: float, bed: float) -> go.Figure:
     return fig
 
 
-def heatmap_figure(chronotype: str, wake: float, now: float) -> go.Figure:
-    df = build_frame(chronotype, wake, step=0.25)
+def heatmap_figure(chronotype: str, wake: float, now: float,
+                   condition: str) -> go.Figure:
+    df = build_frame(chronotype, wake, condition, step=0.25)
     pivot = df.pivot_table(index="marker", columns="hour", values="level")
     order = [m.name for m in MARKERS]
     pivot = pivot.loc[order]
@@ -117,8 +123,8 @@ def heatmap_figure(chronotype: str, wake: float, now: float) -> go.Figure:
 
 
 def curves_figure(chronotype: str, wake: float, now: float,
-                  selected: list[str]) -> go.Figure:
-    df = build_frame(chronotype, wake)
+                  selected: list[str], condition: str) -> go.Figure:
+    df = build_frame(chronotype, wake, condition)
     fig = go.Figure()
     for m in MARKERS:
         if m.name not in selected:
@@ -143,15 +149,19 @@ def curves_figure(chronotype: str, wake: float, now: float,
     return fig
 
 
-def now_table(chronotype: str, wake: float, now: float) -> str:
+def now_table(chronotype: str, wake: float, now: float,
+              condition: str) -> str:
     shift = phase_shift_hours(chronotype, wake)
-    rows = ["| Marker | Organ | Level now | Trend | Peaks at |",
+    note = CONDITIONS[condition].get("note")
+    rows = ([f"**Condition: {condition}** — {note}", ""] if note else []) + \
+           ["| Marker | Organ | Level now | Trend | Peaks at |",
             "|---|---|---|---|---|"]
     for m in MARKERS:
-        val, trend = level_at(m, now % 24, shift)
+        val, trend = level_at(m, now % 24, shift, condition)
         bar = "█" * max(1, round(val / 10)) + "░" * (10 - max(1, round(val / 10)))
+        peak = m.peak + shift + CONDITIONS[condition]["shift"]
         rows.append(f"| **{m.name}** | {m.organ} | `{bar}` {val:.0f}% "
-                    f"| {trend} | {fmt_clock(m.peak + shift)} |")
+                    f"| {trend} | {fmt_clock(peak)} |")
     return "\n".join(rows)
 
 
@@ -177,13 +187,55 @@ def glossary_md() -> str:
     return "\n".join(rows)
 
 
-def update(chronotype, wake, bed, now, selected):
+def gene_figure(chronotype: str, wake: float, tissue: str,
+                condition: str, now: float) -> go.Figure:
+    shift = phase_shift_hours(chronotype, wake)
+    hours = np.arange(0.0, 24.05, 0.1)
+    fig = go.Figure()
+    for symbol, peak, amp, role, group in tissue_gene_table(tissue):
+        y = gene_curve(peak, amp, hours, shift, condition, tissue)
+        fig.add_trace(go.Scatter(
+            x=hours, y=y, name=symbol,
+            line=dict(width=2.5 if group == "Core clock" else 2,
+                      dash="solid" if group == "Core clock" else "dot"),
+            hovertemplate=(f"<b>{symbol}</b> ({group})<br>{role}"
+                           "<br>%{x:.1f} h — %{y:.0f}%<extra></extra>"),
+        ))
+    fig.add_vline(x=now % 24, line_width=2, line_dash="dash",
+                  line_color="#444", annotation_text=f"now {fmt_clock(now)}")
+    fig.update_layout(
+        title=(f"Clock and metabolic gene rhythms — {tissue}, {condition} "
+               "(solid = core clock, dotted = metabolic output)"),
+        height=560, template="plotly_white",
+        xaxis=dict(title="Clock time (h)", dtick=3, range=[0, 24]),
+        yaxis=dict(title="Relative expression (% of peak)", range=[0, 105]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04),
+        margin=dict(l=40, r=40, t=110, b=40),
+    )
+    return fig
+
+
+def gene_table_md(chronotype: str, wake: float, tissue: str,
+                  condition: str) -> str:
+    shift = phase_shift_hours(chronotype, wake) + CONDITIONS[condition]["shift"]
+    rows = ["| Gene | Group | Peaks at | Role |", "|---|---|---|---|"]
+    for symbol, peak, _amp, role, group in tissue_gene_table(tissue):
+        rows.append(f"| **{symbol}** | {group} | {fmt_clock(peak + shift)} "
+                    f"| {role} |")
+    rows += ["", "> Demo values: approximate human peripheral-tissue "
+             "acrophases; disease effects are illustrative damping/delay."]
+    return "\n".join(rows)
+
+
+def update(chronotype, wake, bed, now, selected, condition, tissue):
     return (
-        clock_figure(chronotype, wake, bed),
-        heatmap_figure(chronotype, wake, now),
-        curves_figure(chronotype, wake, now, selected),
-        now_table(chronotype, wake, now),
+        clock_figure(chronotype, wake, bed, condition),
+        heatmap_figure(chronotype, wake, now, condition),
+        curves_figure(chronotype, wake, now, selected, condition),
+        now_table(chronotype, wake, now, condition),
         windows_md(chronotype, wake, bed),
+        gene_figure(chronotype, wake, tissue, condition, now),
+        gene_table_md(chronotype, wake, tissue, condition),
     )
 
 
@@ -201,6 +253,8 @@ with gr.Blocks(title="Human Metabolic Circadian Clock",
     with gr.Row():
         chronotype = gr.Dropdown(list(CHRONOTYPE_OFFSET_H), value="Intermediate",
                                  label="Chronotype")
+        condition = gr.Dropdown(list(CONDITIONS), value="Healthy",
+                                label="Condition / disease")
         wake = gr.Slider(4, 12, value=7.0, step=0.25,
                          label="Habitual wake time (h)")
         bed = gr.Slider(19, 27, value=23.0, step=0.25,
@@ -217,6 +271,10 @@ with gr.Blocks(title="Human Metabolic Circadian Clock",
                                     value=DEFAULT_SELECTED,
                                     label="Markers to plot")
         curve_plot = gr.Plot()
+    with gr.Tab("Gene rhythms"):
+        tissue = gr.Radio(TISSUES, value="Liver", label="Tissue")
+        gene_plot = gr.Plot()
+        gene_md = gr.Markdown()
     with gr.Tab("Right now"):
         now_md = gr.Markdown()
     with gr.Tab("Your day plan"):
@@ -224,8 +282,9 @@ with gr.Blocks(title="Human Metabolic Circadian Clock",
     with gr.Tab("Glossary"):
         gr.Markdown(glossary_md())
 
-    inputs = [chronotype, wake, bed, now, selected]
-    outputs = [clock_plot, heat_plot, curve_plot, now_md, plan_md]
+    inputs = [chronotype, wake, bed, now, selected, condition, tissue]
+    outputs = [clock_plot, heat_plot, curve_plot, now_md, plan_md,
+               gene_plot, gene_md]
     for comp in inputs:
         comp.change(update, inputs, outputs)
     demo.load(update, inputs, outputs)

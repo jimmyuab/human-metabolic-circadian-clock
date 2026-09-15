@@ -49,6 +49,14 @@
         <option value="1.5">Moderate evening</option>
         <option value="3">Definite evening (owl)</option>
       </select></div>
+    <div><label>Condition / disease</label>
+      <select id="cond">
+        <option selected>Healthy</option>
+        <option>Obesity</option>
+        <option>Type 2 diabetes</option>
+        <option>MASLD / MASH</option>
+        <option>Shift work / misalignment</option>
+      </select></div>
     <div><label>Wake time <span class="val" id="wakeV"></span></label>
       <input type="range" id="wake" min="4" max="12" step="0.25" value="7"></div>
     <div><label>Bedtime <span class="val" id="bedV"></span></label>
@@ -61,6 +69,7 @@
     <button data-p="dial" class="active">Clock dial</button>
     <button data-p="heat">Heatmap</button>
     <button data-p="curves">Curves</button>
+    <button data-p="genes">Gene rhythms</button>
     <button data-p="nowp">Right now</button>
     <button data-p="plan">Your day plan</button>
     <button data-p="gloss">Glossary</button>
@@ -71,6 +80,15 @@
   <div class="card pane" id="pane-curves">
     <div class="checks" id="checks"></div>
     <div id="curves" style="height:480px"></div>
+  </div>
+  <div class="card pane" id="pane-genes">
+    <div class="checks" id="tissueRadio">
+      <label><input type="radio" name="tissue" value="Liver" checked> Liver</label>
+      <label><input type="radio" name="tissue" value="Adipose"> Adipose</label>
+      <label><input type="radio" name="tissue" value="Pancreas (islets)"> Pancreas (islets)</label>
+    </div>
+    <div id="genes" style="height:540px"></div>
+    <div id="geneTable" style="margin-top:14px"></div>
   </div>
   <div class="card pane" id="pane-nowp"><div id="nowTable"></div></div>
   <div class="card pane" id="pane-plan"><div id="planBox" class="plan"></div></div>
@@ -109,14 +127,67 @@ const M = [
 ];
 const DEFAULT_SEL = new Set(["melatonin","cortisol","isens","gtol","ghrelin"]);
 
+// Disease / condition effects: amplitude damping + phase delay (illustrative demo)
+const COND = {
+ "Healthy": {amp:1, shift:0, m:{}, note:""},
+ "Obesity": {amp:0.8, shift:0.5, m:{leptin:0.4, ghrelin:0.6, isens:0.7}, tissue:"Adipose",
+   note:"Blunted leptin rhythm, damped adipose clock, mild phase delay."},
+ "Type 2 diabetes": {amp:0.75, shift:1.0, m:{isens:0.45, gtol:0.45, hgp:1.25, melatonin:0.8}, tissue:"Pancreas (islets)",
+   note:"Flattened insulin-sensitivity / glucose-tolerance rhythms, exaggerated dawn hepatic glucose output, islet clock damping."},
+ "MASLD / MASH": {amp:0.85, shift:0.5, m:{tg:1.3, hgp:1.2, isens:0.6, lipo:0.7}, tissue:"Liver",
+   note:"Amplified nocturnal triglyceride export, hepatic insulin resistance, damped liver clock."},
+ "Shift work / misalignment": {amp:0.6, shift:4.0, m:{},
+   note:"Global amplitude loss and ~4 h internal phase delay from chronic behavioral\u2013central desynchrony."},
+};
+const TISSUE_DAMP = 0.6;
+
+// Gene rhythms demo: approximate human peripheral-tissue acrophases
+const CORE_GENES = [
+ ["ARNTL (BMAL1)", 23.0, 70, "Positive limb; activates E-box targets"],
+ ["CLOCK", 22.0, 25, "Positive limb partner of BMAL1"],
+ ["PER1", 8.0, 60, "Negative limb; light/glucocorticoid responsive"],
+ ["PER2", 10.0, 65, "Negative limb; couples clock to lipid metabolism"],
+ ["CRY1", 12.0, 50, "Negative limb; represses gluconeogenesis"],
+ ["CRY2", 10.5, 45, "Negative limb"],
+ ["NR1D1 (REV-ERB\u03b1)", 9.0, 85, "Stabilizing loop; represses BMAL1 and lipogenesis"],
+ ["DBP", 13.0, 80, "Clock output TF driving metabolic genes"],
+];
+const TISSUE_GENES = {
+ "Liver": [
+  ["PCK1", 6.0, 55, "Gluconeogenesis (PEPCK); dawn phenomenon"],
+  ["G6PC1", 5.0, 50, "Glucose-6-phosphatase; hepatic glucose export"],
+  ["SREBF1", 20.0, 45, "Lipogenesis master TF; feeding-phase peak"],
+  ["NAMPT", 15.0, 40, "NAD+ salvage; links clock to SIRT1"],
+  ["ELOVL6", 21.0, 40, "Fatty-acid elongation, lipogenic program"]],
+ "Adipose": [
+  ["LEP", 1.5, 30, "Leptin; nocturnal satiety signal"],
+  ["ADIPOQ", 12.0, 25, "Adiponectin; insulin-sensitizing adipokine"],
+  ["LPL", 14.0, 35, "Lipoprotein lipase; postprandial lipid uptake"],
+  ["PNPLA2 (ATGL)", 6.0, 35, "Triglyceride lipase; fasting lipolysis"]],
+ "Pancreas (islets)": [
+  ["INS", 10.0, 30, "Insulin; secretory capacity peaks in the morning"],
+  ["GCG", 4.0, 25, "Glucagon; counter-regulatory, late-night peak"],
+  ["UCN3", 11.0, 25, "Beta-cell maturation / secretion amplifier"],
+  ["VGF", 9.0, 30, "Secretory-granule biogenesis"]],
+};
+
 const mod24 = h => ((h % 24) + 24) % 24;
 const fmt = h => { h = mod24(h); const hh = Math.floor(h), mm = Math.round((h-hh)*60)%60;
   return String(hh).padStart(2,"0") + ":" + String(mm).padStart(2,"0"); };
 const shiftH = (chrono, wake) => chrono + GAIN * (wake - REF_WAKE);
-function level(m, t, sh) {
-  const base = (Math.cos(2*Math.PI*(t-(m.p+sh))/24)+1)/2;
-  const lo = 100/(1+m.a/100*2);
+function level(m, t, sh, cond) {
+  const c = COND[cond || "Healthy"];
+  const amp = Math.min(m.a * c.amp * (c.m[m.k] || 1), 95);
+  const base = (Math.cos(2*Math.PI*(t-(m.p+sh+c.shift))/24)+1)/2;
+  const lo = 100/(1+amp/100*2);
   return lo + (100-lo)*Math.pow(base, m.s);
+}
+function geneLevel(peak, amp, t, sh, cond, tissue) {
+  const c = COND[cond];
+  let a = amp * c.amp * (c.tissue === tissue ? TISSUE_DAMP : 1);
+  const base = (Math.cos(2*Math.PI*(t-(peak+sh+c.shift))/24)+1)/2;
+  const lo = 100/(1+a/100*2);
+  return lo + (100-lo)*base;
 }
 function windows(chrono, wake, bed) {
   const sh = shiftH(chrono, wake), tp = mod24(18.5+sh);
@@ -137,12 +208,15 @@ const state = () => ({
   wake: parseFloat(document.getElementById("wake").value),
   bed: parseFloat(document.getElementById("bed").value),
   now: parseFloat(document.getElementById("now").value),
+  cond: document.getElementById("cond").value,
+  tissue: document.querySelector('input[name="tissue"]:checked').value,
 });
 const LAYOUT = { template:"plotly_white", paper_bgcolor:"#fff", font:{family:"Segoe UI, sans-serif"},
                  margin:{l:50,r:40,t:60,b:45} };
 
 function drawDial() {
-  const {chrono, wake, bed} = state(), sh = shiftH(chrono, wake);
+  const {chrono, wake, bed, cond} = state();
+  const sh = shiftH(chrono, wake) + COND[cond].shift;
   const traces = [];
   const sleepLen = mod24(wake-bed);
   traces.push({type:"barpolar", r:[1], base:[10.6], width:[sleepLen*15],
@@ -170,9 +244,9 @@ function drawDial() {
     {responsive:true});
 }
 function drawHeat() {
-  const {chrono, wake, now} = state(), sh = shiftH(chrono, wake);
+  const {chrono, wake, now, cond} = state(), sh = shiftH(chrono, wake);
   const hours = []; for (let t=0; t<=24.001; t+=0.25) hours.push(+t.toFixed(2));
-  const z = M.map(m => hours.map(t => level(m,t,sh)));
+  const z = M.map(m => hours.map(t => level(m,t,sh,cond)));
   Plotly.react("heat", [{type:"heatmap", z, x:hours, y:M.map(m=>m.n),
     colorscale:"Viridis", zmin:0, zmax:100, colorbar:{title:"% of peak"},
     hovertemplate:"%{y}<br>%{x:.1f} h — %{z:.0f}%<extra></extra>"}],
@@ -185,10 +259,10 @@ function drawHeat() {
    {responsive:true});
 }
 function drawCurves() {
-  const {chrono, wake, now} = state(), sh = shiftH(chrono, wake);
+  const {chrono, wake, now, cond} = state(), sh = shiftH(chrono, wake);
   const hours = []; for (let t=0; t<=24.001; t+=0.1) hours.push(+t.toFixed(2));
   const traces = M.filter(m => DEFAULT_SEL.has(m.k)).map(m => ({
-    x:hours, y:hours.map(t => level(m,t,sh)), name:m.n, mode:"lines",
+    x:hours, y:hours.map(t => level(m,t,sh,cond)), name:m.n, mode:"lines",
     line:{color:m.c, width:2.5},
     hovertemplate:"%{x:.1f} h — %{y:.0f}%<extra>"+m.n+"</extra>"}));
   Plotly.react("curves", traces, {...LAYOUT,
@@ -201,17 +275,44 @@ function drawCurves() {
    {responsive:true});
 }
 function drawNow() {
-  const {chrono, wake, now} = state(), sh = shiftH(chrono, wake);
-  let html = "<table><tr><th>Marker</th><th>Organ</th><th>Level now</th><th>Trend</th><th>Peaks at</th></tr>";
+  const {chrono, wake, now, cond} = state(), sh = shiftH(chrono, wake);
+  let html = COND[cond].note
+    ? `<p><b>Condition: ${cond}</b> — ${COND[cond].note}</p>` : "";
+  html += "<table><tr><th>Marker</th><th>Organ</th><th>Level now</th><th>Trend</th><th>Peaks at</th></tr>";
   M.forEach(m => {
-    const v = level(m, now, sh), ahead = level(m, now+0.25, sh);
+    const v = level(m, now, sh, cond), ahead = level(m, now+0.25, sh, cond);
     const trend = ahead > v+0.05 ? "rising &#8599;" : (ahead < v-0.05 ? "falling &#8600;" : "peak/trough");
     const nb = Math.max(1, Math.round(v/10));
     html += `<tr><td><b>${m.n}</b></td><td>${m.o}</td>` +
       `<td><span class="bar" style="color:${m.c}">${"\u2588".repeat(nb)}${"\u2591".repeat(10-nb)}</span> ${v.toFixed(0)}%</td>` +
-      `<td>${trend}</td><td>${fmt(m.p+sh)}</td></tr>`;
+      `<td>${trend}</td><td>${fmt(m.p+sh+COND[cond].shift)}</td></tr>`;
   });
   document.getElementById("nowTable").innerHTML = html + "</table>";
+}
+function drawGenes() {
+  const {chrono, wake, now, cond, tissue} = state(), sh = shiftH(chrono, wake);
+  const hours = []; for (let t=0; t<=24.001; t+=0.1) hours.push(+t.toFixed(2));
+  const genes = CORE_GENES.map(g => [...g, "Core clock"])
+    .concat(TISSUE_GENES[tissue].map(g => [...g, "Metabolic output"]));
+  const traces = genes.map(([sym, pk, amp, role, grp]) => ({
+    x:hours, y:hours.map(t => geneLevel(pk, amp, t, sh, cond, tissue)),
+    name:sym, mode:"lines",
+    line:{width: grp === "Core clock" ? 2.5 : 2,
+          dash: grp === "Core clock" ? "solid" : "dot"},
+    hovertemplate:`<b>${sym}</b> (${grp})<br>${role}<br>%{x:.1f} h — %{y:.0f}%<extra></extra>`}));
+  Plotly.react("genes", traces, {...LAYOUT,
+    title:`Clock &amp; metabolic gene rhythms — ${tissue}, ${cond}<br><sub>solid = core clock, dotted = metabolic output — demo values</sub>`,
+    xaxis:{title:"Clock time (h)", dtick:3, range:[0,24]},
+    yaxis:{title:"Relative expression (% of peak)", range:[0,105]},
+    legend:{orientation:"h", y:-0.18},
+    shapes:[{type:"line", x0:now, x1:now, y0:0, y1:105,
+             line:{color:"#444", width:2, dash:"dash"}}]},
+   {responsive:true});
+  let html = "<table><tr><th>Gene</th><th>Group</th><th>Peaks at</th><th>Role</th></tr>";
+  genes.forEach(([sym, pk, _a, role, grp]) => {
+    html += `<tr><td><b>${sym}</b></td><td>${grp}</td><td>${fmt(pk+sh+COND[cond].shift)}</td><td>${role}</td></tr>`;
+  });
+  document.getElementById("geneTable").innerHTML = html + "</table>";
 }
 function drawPlan() {
   const {chrono, wake, bed} = state();
@@ -233,7 +334,7 @@ function refresh() {
   document.getElementById("wakeV").textContent = fmt(s.wake);
   document.getElementById("bedV").textContent = fmt(s.bed);
   document.getElementById("nowV").textContent = fmt(s.now);
-  drawDial(); drawHeat(); drawCurves(); drawNow(); drawPlan();
+  drawDial(); drawHeat(); drawCurves(); drawNow(); drawPlan(); drawGenes();
 }
 // marker checkboxes
 const checks = document.getElementById("checks");
@@ -256,8 +357,10 @@ document.getElementById("tabs").addEventListener("click", e => {
   document.getElementById("pane-"+e.target.dataset.p).classList.add("show");
   window.dispatchEvent(new Event("resize"));
 });
-["chrono","wake","bed","now"].forEach(id =>
+["chrono","cond","wake","bed","now"].forEach(id =>
   document.getElementById(id).addEventListener("input", refresh));
+document.querySelectorAll('input[name="tissue"]').forEach(r =>
+  r.addEventListener("change", drawGenes));
 // default "now" = current local time rounded to 15 min
 const d = new Date();
 document.getElementById("now").value = Math.round((d.getHours()+d.getMinutes()/60)*4)/4;

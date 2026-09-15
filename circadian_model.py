@@ -85,6 +85,107 @@ MARKERS: list[Marker] = [
 
 MARKER_BY_KEY = {m.key: m for m in MARKERS}
 
+# ---------------------------------------------------------------------------
+# Disease / condition effects (simple demo: amplitude damping + phase delay)
+# Literature-inspired caricatures, not fitted values.
+# ---------------------------------------------------------------------------
+
+CONDITIONS: dict[str, dict] = {
+    "Healthy": {"amp_scale": 1.0, "shift": 0.0, "markers": {}},
+    "Obesity": {
+        "amp_scale": 0.8, "shift": 0.5,
+        "markers": {"leptin": 0.4, "ghrelin": 0.6, "insulin_sens": 0.7},
+        "tissue": "Adipose",
+        "note": "Blunted leptin rhythm, damped adipose clock, mild phase delay."},
+    "Type 2 diabetes": {
+        "amp_scale": 0.75, "shift": 1.0,
+        "markers": {"insulin_sens": 0.45, "glucose_tol": 0.45,
+                    "hgp": 1.25, "melatonin": 0.8},
+        "tissue": "Pancreas (islets)",
+        "note": "Flattened insulin-sensitivity/glucose-tolerance rhythms, "
+                "exaggerated dawn hepatic glucose output, islet clock damping."},
+    "MASLD / MASH": {
+        "amp_scale": 0.85, "shift": 0.5,
+        "markers": {"triglycerides": 1.3, "hgp": 1.2,
+                    "insulin_sens": 0.6, "lipolysis": 0.7},
+        "tissue": "Liver",
+        "note": "Amplified nocturnal triglyceride export, hepatic insulin "
+                "resistance, damped liver clock."},
+    "Shift work / misalignment": {
+        "amp_scale": 0.6, "shift": 4.0, "markers": {},
+        "note": "Global amplitude loss and ~4 h internal phase delay from "
+                "chronic behavioral-central desynchrony."},
+}
+
+CONDITION_TISSUE_GENE_DAMP = 0.6  # extra damping of clock genes in the hit tissue
+
+
+def condition_params(condition: str, key: str) -> tuple[float, float]:
+    """(amplitude multiplier, extra phase delay h) for a marker key."""
+    c = CONDITIONS[condition]
+    return c["amp_scale"] * c["markers"].get(key, 1.0), c["shift"]
+
+# ---------------------------------------------------------------------------
+# Gene rhythms demo (core clock + tissue metabolic outputs)
+# Approximate human peripheral-tissue acrophases, intermediate chronotype.
+# ---------------------------------------------------------------------------
+
+CORE_CLOCK_GENES: list[tuple[str, float, float, str]] = [
+    # (symbol, peak h, amplitude %, role)
+    ("ARNTL (BMAL1)", 23.0, 70, "Positive limb; activates E-box targets"),
+    ("CLOCK", 22.0, 25, "Positive limb partner of BMAL1"),
+    ("PER1", 8.0, 60, "Negative limb; light/glucocorticoid responsive"),
+    ("PER2", 10.0, 65, "Negative limb; couples clock to lipid metabolism"),
+    ("CRY1", 12.0, 50, "Negative limb; represses gluconeogenesis"),
+    ("CRY2", 10.5, 45, "Negative limb"),
+    ("NR1D1 (REV-ERBa)", 9.0, 85, "Stabilizing loop; represses BMAL1 and lipogenesis"),
+    ("DBP", 13.0, 80, "Clock output TF driving metabolic genes"),
+]
+
+TISSUE_GENES: dict[str, list[tuple[str, float, float, str]]] = {
+    "Liver": [
+        ("PCK1", 6.0, 55, "Gluconeogenesis (PEPCK); dawn phenomenon"),
+        ("G6PC1", 5.0, 50, "Glucose-6-phosphatase; hepatic glucose export"),
+        ("SREBF1", 20.0, 45, "Lipogenesis master TF; feeding-phase peak"),
+        ("NAMPT", 15.0, 40, "NAD+ salvage; links clock to SIRT1"),
+        ("ELOVL6", 21.0, 40, "Fatty-acid elongation, lipogenic program"),
+    ],
+    "Adipose": [
+        ("LEP", 1.5, 30, "Leptin; nocturnal satiety signal"),
+        ("ADIPOQ", 12.0, 25, "Adiponectin; insulin-sensitizing adipokine"),
+        ("LPL", 14.0, 35, "Lipoprotein lipase; postprandial lipid uptake"),
+        ("PNPLA2 (ATGL)", 6.0, 35, "Triglyceride lipase; fasting lipolysis"),
+    ],
+    "Pancreas (islets)": [
+        ("INS", 10.0, 30, "Insulin; secretory capacity peaks in the morning"),
+        ("GCG", 4.0, 25, "Glucagon; counter-regulatory, late-night peak"),
+        ("UCN3", 11.0, 25, "Beta-cell maturation / secretion amplifier"),
+        ("VGF", 9.0, 30, "Secretory-granule biogenesis"),
+    ],
+}
+
+TISSUES = list(TISSUE_GENES)
+
+
+def tissue_gene_table(tissue: str) -> list[tuple[str, float, float, str, str]]:
+    """(symbol, peak, amp, role, group) for one tissue."""
+    rows = [(*g, "Core clock") for g in CORE_CLOCK_GENES]
+    rows += [(*g, "Metabolic output") for g in TISSUE_GENES[tissue]]
+    return rows
+
+
+def gene_curve(peak: float, amp: float, hours: np.ndarray, shift: float,
+               condition: str, tissue: str) -> np.ndarray:
+    """Relative expression (0-100) with condition damping."""
+    c = CONDITIONS[condition]
+    eff_amp = amp * c["amp_scale"]
+    if c.get("tissue") == tissue:
+        eff_amp *= CONDITION_TISSUE_GENE_DAMP
+    phase = 2.0 * math.pi * (hours - (peak + shift + c["shift"])) / 24.0
+    base = (np.cos(phase) + 1.0) / 2.0
+    lo = 100.0 / (1.0 + eff_amp / 100.0 * 2.0)
+    return lo + (100.0 - lo) * base
+
 
 def phase_shift_hours(chronotype: str, wake_time: float) -> float:
     """Total phase displacement vs. the reference schedule."""
@@ -92,28 +193,33 @@ def phase_shift_hours(chronotype: str, wake_time: float) -> float:
             + ENTRAINMENT_GAIN * (wake_time - REFERENCE_WAKE))
 
 
-def marker_curve(marker: Marker, hours: np.ndarray, shift: float) -> np.ndarray:
+def marker_curve(marker: Marker, hours: np.ndarray, shift: float,
+                 condition: str = "Healthy") -> np.ndarray:
     """Relative level (0-100) across clock hours."""
-    phase = 2.0 * math.pi * (hours - (marker.peak + shift)) / 24.0
+    amp_mult, extra_shift = condition_params(condition, marker.key)
+    phase = 2.0 * math.pi * (hours - (marker.peak + shift + extra_shift)) / 24.0
     base = (np.cos(phase) + 1.0) / 2.0  # 0..1
     shaped = base ** marker.sharpness  # sharpen nocturnal pulses
-    lo = 100.0 / (1.0 + marker.amplitude / 100.0 * 2.0)
+    amp = min(marker.amplitude * amp_mult, 95.0)
+    lo = 100.0 / (1.0 + amp / 100.0 * 2.0)
     return lo + (100.0 - lo) * shaped
 
 
 def build_frame(chronotype: str, wake_time: float,
+                condition: str = "Healthy",
                 step: float = 0.1) -> pd.DataFrame:
     """Long-format dataframe of all marker curves for one schedule."""
     shift = phase_shift_hours(chronotype, wake_time)
     hours = np.arange(0.0, 24.0 + step, step)
     parts = []
     for m in MARKERS:
+        _, extra = condition_params(condition, m.key)
         parts.append(pd.DataFrame({
             "hour": hours,
-            "level": marker_curve(m, hours, shift),
+            "level": marker_curve(m, hours, shift, condition),
             "marker": m.name,
             "organ": m.organ,
-            "peak": (m.peak + shift) % 24.0,
+            "peak": (m.peak + shift + extra) % 24.0,
         }))
     return pd.concat(parts, ignore_index=True)
 
@@ -123,10 +229,11 @@ def fmt_clock(h: float) -> str:
     return f"{int(h):02d}:{int(round((h - int(h)) * 60)) % 60:02d}"
 
 
-def level_at(marker: Marker, hour: float, shift: float) -> tuple[float, str]:
+def level_at(marker: Marker, hour: float, shift: float,
+             condition: str = "Healthy") -> tuple[float, str]:
     """Level (0-100) and trend arrow at a given clock hour."""
-    val = float(marker_curve(marker, np.array([hour]), shift)[0])
-    ahead = float(marker_curve(marker, np.array([hour + 0.25]), shift)[0])
+    val = float(marker_curve(marker, np.array([hour]), shift, condition)[0])
+    ahead = float(marker_curve(marker, np.array([hour + 0.25]), shift, condition)[0])
     trend = "rising" if ahead > val + 0.05 else ("falling" if ahead < val - 0.05 else "peak/trough")
     return val, trend
 

@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Human Metabolic Circadian Clock</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root { --bg:#f6f7fb; --card:#ffffff; --ink:#1f2430; --sub:#5b6472; --accent:#5e60ce; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--ink); }
+  .wrap { max-width:1100px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { margin:0 0 4px; font-size:1.7rem; }
+  .sub { color:var(--sub); margin-bottom:20px; }
+  .card { background:var(--card); border-radius:14px; padding:18px 20px; box-shadow:0 1px 4px rgba(20,30,60,.08); margin-bottom:18px; }
+  .controls { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; }
+  label { display:block; font-size:.85rem; font-weight:600; margin-bottom:6px; }
+  select,input[type=range] { width:100%; }
+  select { padding:6px 8px; border-radius:8px; border:1px solid #d4d9e2; }
+  .val { font-weight:400; color:var(--accent); }
+  .tabs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+  .tabs button { border:1px solid #d4d9e2; background:#fff; padding:8px 14px; border-radius:999px; cursor:pointer; font-size:.9rem; }
+  .tabs button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .pane { display:none; } .pane.show { display:block; }
+  table { border-collapse:collapse; width:100%; font-size:.88rem; }
+  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid #e8ebf1; }
+  th { color:var(--sub); font-weight:600; }
+  .bar { font-family:monospace; letter-spacing:-1px; }
+  .plan li { margin:6px 0; }
+  .note { color:var(--sub); font-size:.8rem; margin-top:14px; }
+  .checks { display:flex; flex-wrap:wrap; gap:10px 16px; margin-bottom:10px; font-size:.85rem; }
+  .checks label { display:flex; align-items:center; gap:5px; font-weight:400; margin:0; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>&#128336; Human Metabolic Circadian Clock</h1>
+  <div class="sub">How hormones, fuel handling and organ metabolism cycle across 24&nbsp;h &mdash;
+    personalized by chronotype and sleep schedule. Cosinor model of population-average human chronobiology.
+    <a href="https://github.com/jimmyuab/human-metabolic-circadian-clock">Source on GitHub</a></div>
+
+  <div class="card controls">
+    <div><label>Chronotype</label>
+      <select id="chrono">
+        <option value="-2">Definite morning (lark)</option>
+        <option value="-1">Moderate morning</option>
+        <option value="0" selected>Intermediate</option>
+        <option value="1.5">Moderate evening</option>
+        <option value="3">Definite evening (owl)</option>
+      </select></div>
+    <div><label>Wake time <span class="val" id="wakeV"></span></label>
+      <input type="range" id="wake" min="4" max="12" step="0.25" value="7"></div>
+    <div><label>Bedtime <span class="val" id="bedV"></span></label>
+      <input type="range" id="bed" min="19" max="27" step="0.25" value="23"></div>
+    <div><label>Query time &ldquo;now&rdquo; <span class="val" id="nowV"></span></label>
+      <input type="range" id="now" min="0" max="23.75" step="0.25" value="12"></div>
+  </div>
+
+  <div class="tabs" id="tabs">
+    <button data-p="dial" class="active">Clock dial</button>
+    <button data-p="heat">Heatmap</button>
+    <button data-p="curves">Curves</button>
+    <button data-p="nowp">Right now</button>
+    <button data-p="plan">Your day plan</button>
+    <button data-p="gloss">Glossary</button>
+  </div>
+
+  <div class="card pane show" id="pane-dial"><div id="dial" style="height:620px"></div></div>
+  <div class="card pane" id="pane-heat"><div id="heat" style="height:520px"></div></div>
+  <div class="card pane" id="pane-curves">
+    <div class="checks" id="checks"></div>
+    <div id="curves" style="height:480px"></div>
+  </div>
+  <div class="card pane" id="pane-nowp"><div id="nowTable"></div></div>
+  <div class="card pane" id="pane-plan"><div id="planBox" class="plan"></div></div>
+  <div class="card pane" id="pane-gloss"><div id="glossBox"></div></div>
+
+  <div class="note">Educational model of population-average rhythms &mdash; not a medical device, not medical advice.</div>
+</div>
+
+<script>
+const REF_WAKE = 7.0, GAIN = 0.6;
+const M = [
+ {k:"melatonin", n:"Melatonin", o:"Pineal / SCN", p:3.5, a:90, s:2.5, c:"#5e60ce",
+  d:"Darkness hormone. Nocturnal secretion; acutely impairs glucose tolerance when eating overlaps its rise."},
+ {k:"cortisol", n:"Cortisol", o:"Adrenal (HPA axis)", p:8.0, a:80, s:2.0, c:"#e63946",
+  d:"Awakening response peaks ~30\u201345 min after wake; mobilizes glucose and primes catabolism."},
+ {k:"temp", n:"Core body temperature", o:"Hypothalamus", p:18.5, a:15, s:1, c:"#f4a261",
+  d:"Minimum ~2 h before habitual wake, maximum early evening; canonical central-clock phase marker."},
+ {k:"isens", n:"Insulin sensitivity", o:"Muscle / Liver", p:9.0, a:35, s:1, c:"#2a9d8f",
+  d:"Peripheral glucose disposal is highest in the biological morning and declines toward evening."},
+ {k:"gtol", n:"Glucose tolerance", o:"Pancreas (beta-cell)", p:10.0, a:30, s:1, c:"#0096c7",
+  d:"Identical meals evoke larger glucose excursions in the evening: beta-cell responsiveness falls across the day."},
+ {k:"leptin", n:"Leptin", o:"Adipose", p:1.5, a:30, s:1, c:"#b5838d",
+  d:"Satiety adipokine peaking during sleep, restraining nocturnal appetite."},
+ {k:"ghrelin", n:"Ghrelin / appetite drive", o:"Stomach / Gut", p:20.0, a:30, s:1.2, c:"#e76f51",
+  d:"Hunger signal with an evening crest independent of time since last meal."},
+ {k:"tg", n:"Plasma triglycerides", o:"Liver (VLDL)", p:3.5, a:25, s:1, c:"#6a994e",
+  d:"Nocturnal peak from hepatic VLDL export during the fasting phase."},
+ {k:"hgp", n:"Hepatic glucose output", o:"Liver", p:5.0, a:25, s:1.2, c:"#386641",
+  d:"Dawn phenomenon: gluconeogenesis ramps up before waking to fuel the anticipated active phase."},
+ {k:"lipo", n:"Adipose lipolysis", o:"Adipose", p:6.0, a:25, s:1, c:"#9d4edd",
+  d:"Fatty-acid release is maximal in the late biological night, fueling fasting metabolism."},
+ {k:"ree", n:"Resting energy expenditure", o:"Whole body", p:17.0, a:12, s:1, c:"#8338ec",
+  d:"Diet-induced and resting thermogenesis are higher in the biological morning/afternoon than at night."},
+ {k:"perf", n:"Muscle performance", o:"Skeletal muscle", p:17.5, a:12, s:1, c:"#fb8500",
+  d:"Strength, power and oxidative capacity peak in the late afternoon near the temperature maximum."},
+];
+const DEFAULT_SEL = new Set(["melatonin","cortisol","isens","gtol","ghrelin"]);
+
+const mod24 = h => ((h % 24) + 24) % 24;
+const fmt = h => { h = mod24(h); const hh = Math.floor(h), mm = Math.round((h-hh)*60)%60;
+  return String(hh).padStart(2,"0") + ":" + String(mm).padStart(2,"0"); };
+const shiftH = (chrono, wake) => chrono + GAIN * (wake - REF_WAKE);
+function level(m, t, sh) {
+  const base = (Math.cos(2*Math.PI*(t-(m.p+sh))/24)+1)/2;
+  const lo = 100/(1+m.a/100*2);
+  return lo + (100-lo)*Math.pow(base, m.s);
+}
+function windows(chrono, wake, bed) {
+  const sh = shiftH(chrono, wake), tp = mod24(18.5+sh);
+  const es = mod24(wake+1), span = mod24(bed-es);
+  const el = Math.min(10, Math.max(6, span-3));
+  return [
+    ["Bright light exposure", mod24(wake), mod24(wake+1)],
+    ["Eating window (TRE)", es, mod24(es+el)],
+    ["Largest meal", mod24(wake+1), mod24(wake+5)],
+    ["Caffeine cutoff by", mod24(wake+8), null],
+    ["Exercise sweet spot", mod24(tp-1.5), mod24(tp+1.5)],
+    ["Wind down / dim light", mod24(bed-2), mod24(bed)],
+    ["Sleep", mod24(bed), mod24(wake)],
+  ];
+}
+const state = () => ({
+  chrono: parseFloat(document.getElementById("chrono").value),
+  wake: parseFloat(document.getElementById("wake").value),
+  bed: parseFloat(document.getElementById("bed").value),
+  now: parseFloat(document.getElementById("now").value),
+});
+const LAYOUT = { template:"plotly_white", paper_bgcolor:"#fff", font:{family:"Segoe UI, sans-serif"},
+                 margin:{l:50,r:40,t:60,b:45} };
+
+function drawDial() {
+  const {chrono, wake, bed} = state(), sh = shiftH(chrono, wake);
+  const traces = [];
+  const sleepLen = mod24(wake-bed);
+  traces.push({type:"barpolar", r:[1], base:[10.6], width:[sleepLen*15],
+    theta:[mod24(bed+sleepLen/2)*15], marker:{color:"rgba(70,80,140,.35)"},
+    name:"Sleep", hoverinfo:"name"});
+  const w = windows(chrono, wake, bed), eat = w[1];
+  const el = mod24(eat[2]-eat[1]);
+  traces.push({type:"barpolar", r:[1], base:[10.6], width:[el*15],
+    theta:[mod24(eat[1]+el/2)*15], marker:{color:"rgba(42,157,143,.35)"},
+    name:"Eating window", hoverinfo:"name"});
+  M.forEach((m,i) => {
+    const pk = mod24(m.p+sh);
+    traces.push({type:"scatterpolar", mode:"markers+text",
+      r:[10 - i*0.72], theta:[pk*15], text:[m.n], textposition:"middle right",
+      textfont:{size:10}, marker:{size:13, color:m.c, line:{width:1,color:"#fff"}},
+      hovertemplate:`<b>${m.n}</b> (${m.o})<br>peak ${fmt(pk)}<extra></extra>`});
+  });
+  Plotly.react("dial", traces, {...LAYOUT,
+    title:`Peak times on the 24 h dial  (phase shift ${sh>=0?"+":""}${sh.toFixed(1)} h)`,
+    showlegend:false,
+    polar:{ radialaxis:{visible:false, range:[0,11.8]},
+      angularaxis:{rotation:90, direction:"clockwise", tickmode:"array",
+        tickvals:[0,45,90,135,180,225,270,315],
+        ticktext:["00:00","03:00","06:00","09:00","12:00","15:00","18:00","21:00"]}}},
+    {responsive:true});
+}
+function drawHeat() {
+  const {chrono, wake, now} = state(), sh = shiftH(chrono, wake);
+  const hours = []; for (let t=0; t<=24.001; t+=0.25) hours.push(+t.toFixed(2));
+  const z = M.map(m => hours.map(t => level(m,t,sh)));
+  Plotly.react("heat", [{type:"heatmap", z, x:hours, y:M.map(m=>m.n),
+    colorscale:"Viridis", zmin:0, zmax:100, colorbar:{title:"% of peak"},
+    hovertemplate:"%{y}<br>%{x:.1f} h — %{z:.0f}%<extra></extra>"}],
+   {...LAYOUT, title:"Relative level of each metabolic output across the day",
+    xaxis:{title:"Clock time (h)", dtick:3}, yaxis:{autorange:"reversed"},
+    shapes:[{type:"line", x0:now, x1:now, y0:-0.5, y1:M.length-0.5,
+             line:{color:"#fff", width:2, dash:"dash"}}],
+    annotations:[{x:now, y:1.04, yref:"paper", showarrow:false,
+                  text:"now "+fmt(now), font:{color:"#333", size:11}}]},
+   {responsive:true});
+}
+function drawCurves() {
+  const {chrono, wake, now} = state(), sh = shiftH(chrono, wake);
+  const hours = []; for (let t=0; t<=24.001; t+=0.1) hours.push(+t.toFixed(2));
+  const traces = M.filter(m => DEFAULT_SEL.has(m.k)).map(m => ({
+    x:hours, y:hours.map(t => level(m,t,sh)), name:m.n, mode:"lines",
+    line:{color:m.c, width:2.5},
+    hovertemplate:"%{x:.1f} h — %{y:.0f}%<extra>"+m.n+"</extra>"}));
+  Plotly.react("curves", traces, {...LAYOUT,
+    title:"24 h profiles (% of individual peak)",
+    xaxis:{title:"Clock time (h)", dtick:3, range:[0,24]},
+    yaxis:{title:"% of peak", range:[0,105]},
+    legend:{orientation:"h", y:1.12},
+    shapes:[{type:"line", x0:now, x1:now, y0:0, y1:105,
+             line:{color:"#444", width:2, dash:"dash"}}]},
+   {responsive:true});
+}
+function drawNow() {
+  const {chrono, wake, now} = state(), sh = shiftH(chrono, wake);
+  let html = "<table><tr><th>Marker</th><th>Organ</th><th>Level now</th><th>Trend</th><th>Peaks at</th></tr>";
+  M.forEach(m => {
+    const v = level(m, now, sh), ahead = level(m, now+0.25, sh);
+    const trend = ahead > v+0.05 ? "rising &#8599;" : (ahead < v-0.05 ? "falling &#8600;" : "peak/trough");
+    const nb = Math.max(1, Math.round(v/10));
+    html += `<tr><td><b>${m.n}</b></td><td>${m.o}</td>` +
+      `<td><span class="bar" style="color:${m.c}">${"\u2588".repeat(nb)}${"\u2591".repeat(10-nb)}</span> ${v.toFixed(0)}%</td>` +
+      `<td>${trend}</td><td>${fmt(m.p+sh)}</td></tr>`;
+  });
+  document.getElementById("nowTable").innerHTML = html + "</table>";
+}
+function drawPlan() {
+  const {chrono, wake, bed} = state();
+  const name = document.getElementById("chrono").selectedOptions[0].text.toLowerCase();
+  let html = `<h3>Suggested timing for your schedule (wake ${fmt(wake)}, sleep ${fmt(bed)}, ${name})</h3><ul>`;
+  windows(chrono, wake, bed).forEach(([n,a,b]) => {
+    html += b === null ? `<li><b>${n}</b> ${fmt(a)}</li>`
+                       : `<li><b>${n}</b>: ${fmt(a)} &ndash; ${fmt(b)}</li>`;
+  });
+  document.getElementById("planBox").innerHTML = html + "</ul>";
+}
+function drawGloss() {
+  let html = "<table><tr><th>Marker</th><th>Organ</th><th>What it does</th></tr>";
+  M.forEach(m => html += `<tr><td><b style="color:${m.c}">${m.n}</b></td><td>${m.o}</td><td>${m.d}</td></tr>`);
+  document.getElementById("glossBox").innerHTML = html + "</table>";
+}
+function refresh() {
+  const s = state();
+  document.getElementById("wakeV").textContent = fmt(s.wake);
+  document.getElementById("bedV").textContent = fmt(s.bed);
+  document.getElementById("nowV").textContent = fmt(s.now);
+  drawDial(); drawHeat(); drawCurves(); drawNow(); drawPlan();
+}
+// marker checkboxes
+const checks = document.getElementById("checks");
+M.forEach(m => {
+  const l = document.createElement("label");
+  l.innerHTML = `<input type="checkbox" value="${m.k}" ${DEFAULT_SEL.has(m.k)?"checked":""}>` +
+                `<span style="color:${m.c};font-weight:600">${m.n}</span>`;
+  l.querySelector("input").addEventListener("change", e => {
+    e.target.checked ? DEFAULT_SEL.add(m.k) : DEFAULT_SEL.delete(m.k);
+    drawCurves();
+  });
+  checks.appendChild(l);
+});
+// tabs
+document.getElementById("tabs").addEventListener("click", e => {
+  if (e.target.tagName !== "BUTTON") return;
+  document.querySelectorAll(".tabs button").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".pane").forEach(p => p.classList.remove("show"));
+  e.target.classList.add("active");
+  document.getElementById("pane-"+e.target.dataset.p).classList.add("show");
+  window.dispatchEvent(new Event("resize"));
+});
+["chrono","wake","bed","now"].forEach(id =>
+  document.getElementById(id).addEventListener("input", refresh));
+// default "now" = current local time rounded to 15 min
+const d = new Date();
+document.getElementById("now").value = Math.round((d.getHours()+d.getMinutes()/60)*4)/4;
+drawGloss(); refresh();
+</script>
+</body>
+</html>
